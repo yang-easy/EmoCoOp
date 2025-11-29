@@ -1,64 +1,81 @@
-# Prompt Learning for Vision-Language Models
+# EmoCoOp: Dynamic Vision-Language Coupling for Multi-Label Emotion Classification in Dongba Paintings
 
-This repo contains the codebase of a series of research projects focused on adapting vision-language models like [CLIP](https://arxiv.org/abs/2103.00020) to downstream datasets via *prompt learning*:
+**作者**  
+Rongyi Yang（杨荣懿）  
+邮箱: 12024115003@stu.ynu.edu.cn  
+Wenhua Qian（钱文华，通讯作者）  
+邮箱: whqian@ynu.edu.cn  
+Peng Liu（刘朋）  
+邮箱: pengliu0606@gmail.com  
 
-* [Conditional Prompt Learning for Vision-Language Models](https://arxiv.org/abs/2203.05557), in CVPR, 2022.
-* [Learning to Prompt for Vision-Language Models](https://arxiv.org/abs/2109.01134), IJCV, 2022.
+单位：云南大学信息学院，昆明 650504，中国
 
-## Updates
+本仓库为论文“EmoCoOp: Dynamic Vision-Language Coupling for Multi-Label Emotion Classification in Dongba Paintings”配套代码。
 
-- **07.10.2022**: Just added to both [CoOp](https://arxiv.org/abs/2109.01134) and [CoCoOp](https://arxiv.org/abs/2203.05557) (in their appendices) the results on the newly proposed DOSCO (DOmain Shift in COntext) benchmark, which focuses on contextual domain shift and covers a diverse set of classification problems. (The paper about DOSCO is [here](https://arxiv.org/abs/2209.07521) and the code for running CoOp/CoCoOp on DOSCO is [here](https://github.com/KaiyangZhou/on-device-dg).)
+> 论文尚未公开发表，暂不提供预印本或引用信息。
 
-- **17.09.2022**: [Call for Papers](https://kaiyangzhou.github.io/assets/cfp_ijcv_lvms.html): IJCV Special Issue on *The Promises and Dangers of Large Vision Models*.
+## 项目简介
+EmoCoOp 是一个面向东巴绘画多标签情感分类的视觉-语言模型，基于CLIP框架，融合了动态视觉提示、辅助情绪头、自适应损失权重等机制，支持冷暖色调分析、深度视觉特征聚类、GloVe文本初始化等功能。
 
-- **16.07.2022**: CoOp has been accepted to IJCV for publication!
+## 主要特性
+- **动态视觉提示学习（VPT）**：动态生成视觉prompt，支持聚类初始化和V-T耦合。
+- **辅助情绪分类头**：提升情感识别能力，辅助主任务优化。
+- **自适应损失权重**：根据验证集表现动态调整辅助损失权重。
+- **GloVe初始化**：文本prompt可用GloVe词向量初始化，提升语义泛化。
+- **冷暖色调分析（可选）**：支持色彩情感特征分析（如需融合请参考`visual_components.py`）。
 
-- **10.06.2022**: Our latest work, [Neural Prompt Search](https://arxiv.org/abs/2206.04673), has just been released on arxiv. It provides a novel perspective for fine-tuning large vision models like [ViT](https://arxiv.org/abs/2010.11929), so please check it out if you're interested in parameter-efficient fine-tuning/transfer learning. The code is also made public [here](https://github.com/Davidzhangyuanhan/NOAH).
+## 训练参数说明
+训练模型时需指定以下主要参数：
+- `--dataset-config-file`：数据集配置文件（如`configs/datasets/emotion_dataset.yaml`）。
+- `--config-file`：训练器配置文件（如`configs/trainers/CoCoOp/vit_emotion.yaml`）。
+- `--trainer`：Trainer名称，推荐使用`EmoCoOp`（如需兼容原CoCoOp也可用`CoCoOp`）。
+- `--output-dir`：输出目录。
+- 其他可选参数：`--eval-only`（仅评估），`--model-dir`（加载模型目录），`--load-epoch`（加载指定epoch权重）。
 
-- **08.06.2022**: If you're looking for the code to draw the few-shot performance curves (like the ones we show in the CoOp's paper), see `draw_curves.py`.
-
-- **09.04.2022**: The pre-trained weights of CoOp on ImageNet are released [here](#pre-trained-models).
-
-- **11.03.2022**: The code of our CVPR'22 paper, "[Conditional Prompt Learning for Vision-Language Models](https://arxiv.org/abs/2203.05557)," is released.
-
-- **15.10.2021**: We find that the `best_val` model and the `last_step` model achieve similar performance, so we set `TEST.FINAL_MODEL = "last_step"` for all datasets to save training time. Why we used `best_val`: the ([tiny](https://github.com/KaiyangZhou/CoOp/blob/main/datasets/oxford_pets.py#L32)) validation set was designed for the linear probe approach, which requires extensive tuning for its hyperparameters, so we used the `best_val` model for CoOp as well for fair comparison (in this way, both approaches have access to the validation set).
-
-- **09.10.2021**: Important changes are made to Dassl's transforms.py. Please pull the latest commits from https://github.com/KaiyangZhou/Dassl.pytorch and this repo to make sure the code works properly. In particular, 1) `center_crop` now becomes a default transform in testing (applied after resizing the smaller edge to a certain size to keep the image aspect ratio), and 2) for training, `Resize(cfg.INPUT.SIZE)` is deactivated when `random_crop` or `random_resized_crop` is used. Please read this [issue](https://github.com/KaiyangZhou/CoOp/issues/8) on how these changes might affect the performance.
-
-- **18.09.2021**: We have fixed an error in Dassl which could cause a training data loader to have zero length (so no training will be performed) when the dataset size is smaller than the batch size (due to `drop_last=True`). Please pull the latest commit for Dassl (>= `8eecc3c`). This error led to lower results for CoOp in EuroSAT's 1- and 2-shot settings (others are all correct). We will update the paper on arxiv to fix this error.
-
-## How to Install
-This code is built on top of the awesome toolbox [Dassl.pytorch](https://github.com/KaiyangZhou/Dassl.pytorch) so you need to install the `dassl` environment first. Simply follow the instructions described [here](https://github.com/KaiyangZhou/Dassl.pytorch#installation) to install `dassl` as well as PyTorch. After that, run `pip install -r requirements.txt` under `CoOp/` to install a few more packages required by [CLIP](https://github.com/openai/CLIP) (this should be done when `dassl` is activated). Then, you are ready to go.
-
-Follow [DATASETS.md](DATASETS.md) to install the datasets.
-
-## How to Run
-
-Click a paper below to see the detailed instructions on how to run the code to reproduce the results.
-
-* [Learning to Prompt for Vision-Language Models](COOP.md)
-* [Conditional Prompt Learning for Vision-Language Models](COCOOP.md)
-
-## Models and Results
-
-- The pre-trained weights of CoOp (both M=16 & M=4) on ImageNet based on RN50, RN101, ViT-B/16 and ViT-B/32 can be downloaded altogether via this [link](https://drive.google.com/file/d/18ypxfd82RR0pizc5MM1ZWDYDk4j0BtPF/view?usp=sharing). The weights can be used to reproduce the results in Table 1 of CoOp's paper (i.e., the results on ImageNet and its four variants with domain shift). To load the weights and run the evaluation code, you will need to specify `--model-dir` and `--load-epoch` (see this [script](https://github.com/KaiyangZhou/CoOp/blob/main/scripts/eval.sh) for example).
-- The raw numerical results can be found at this [google drive link](https://docs.google.com/spreadsheets/d/12_kaFdD0nct9aUIrDoreY0qDunQ9q9tv/edit?usp=sharing&ouid=100312610418109826457&rtpof=true&sd=true).
-
-## Citation
-If you use this code in your research, please kindly cite the following papers
-
+## 训练模型示例
 ```bash
-@inproceedings{zhou2022cocoop,
-    title={Conditional Prompt Learning for Vision-Language Models},
-    author={Zhou, Kaiyang and Yang, Jingkang and Loy, Chen Change and Liu, Ziwei},
-    booktitle={IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)},
-    year={2022}
-}
-
-@article{zhou2022coop,
-    title={Learning to Prompt for Vision-Language Models},
-    author={Zhou, Kaiyang and Yang, Jingkang and Loy, Chen Change and Liu, Ziwei},
-    journal={International Journal of Computer Vision (IJCV)},
-    year={2022}
-}
+python train.py \
+  --dataset-config-file configs/datasets/emotion_dataset.yaml \
+  --config-file configs/trainers/CoCoOp/vit_emotion.yaml \
+  --trainer EmoCoOp \
+  --output-dir output/emocoop
 ```
+
+## 复现/评估模型示例
+```bash
+python train.py \
+  --dataset-config-file configs/datasets/emotion_dataset.yaml \
+  --config-file configs/trainers/CoCoOp/vit_emotion.yaml \
+  --trainer EmoCoOp \
+  --output-dir output/emocoop-120 \
+  --eval-only \
+  --model-dir output/emocoop-120 \
+  --load-epoch 80
+```
+
+
+## 依赖环境
+- Python >= 3.8
+- PyTorch >= 1.10
+- torchvision, scikit-learn, pandas, numpy, gensim 等
+- 详见`requirements.txt`
+
+## 目录结构简述
+- `train.py`：主训练入口
+- `trainers/`：核心模型与训练器实现（如`cocoop.py`、`visual_components.py`等）
+- `configs/`：数据集与训练器配置
+- `output/`：训练与评估结果输出
+
+## 参考与致谢
+本项目部分实现参考了CLIP、CoOp/CoCoOp等开源工作，感谢原作者贡献。
+
+## EmoCoOp: Brief English Description
+
+Dongba paintings, a unique Naxi cultural heritage, present complex symbolism and diverse visual aesthetics. Existing vision–language models struggle with domain generalization in few-shot multi-label emotion classification for these artworks. To address this, we propose EmoCoOp—a dynamic vision-language prompt coupling framework. EmoCoOp leverages latent visual priors to guide prompt learning and utilizes a meta-network for adaptive visual prompt generation. A vision-text prompt coupling mechanism enables deep multimodal integration, while a dual-path chromatic affective inference module models both coloration and emotional expression. Experiments show that EmoCoOp achieves state-of-the-art results (75.73% mAP, 82.21% Recall@2), significantly surpassing previous methods. This framework advances multi-label emotion classification for ethnic artworks and cross-modal understanding.
+
+## Availability of Supporting Data
+
+The raw data of this study, which concern Dongba paintings and involve ethnic cultural particularity as well as group privacy, are not publicly available due to ethical considerations related to the protection of cultural heritage and privacy.
+
+---
+如有问题欢迎提交issue或联系作者。

@@ -6,25 +6,25 @@ from dassl.config import get_cfg_default
 from dassl.engine import build_trainer
 
 # custom
-import datasets.oxford_pets
-import datasets.oxford_flowers
-import datasets.fgvc_aircraft
-import datasets.dtd
-import datasets.eurosat
-import datasets.stanford_cars
-import datasets.food101
-import datasets.sun397
-import datasets.caltech101
-import datasets.ucf101
-import datasets.imagenet
+import datasets.emotion_dataset
+# import datasets.oxford_pets
+# import datasets.oxford_flowers
+# import datasets.fgvc_aircraft
+# import datasets.eurosat
+# import datasets.stanford_cars
+# import datasets.food101
+# import datasets.sun397
+# import datasets.caltech101
+# import datasets.ucf101
+# import datasets.imagenet
 
-import datasets.imagenet_sketch
-import datasets.imagenetv2
-import datasets.imagenet_a
-import datasets.imagenet_r
+# import datasets.imagenet_sketch
+# import datasets.imagenetv2
+# import datasets.imagenet_a
+# import datasets.imagenet_r
 
 import trainers.coop
-import trainers.cocoop
+import trainers.emocoop
 import trainers.zsclip
 
 
@@ -88,19 +88,37 @@ def extend_cfg(cfg):
     from yacs.config import CfgNode as CN
 
     cfg.TRAINER.COOP = CN()
-    cfg.TRAINER.COOP.N_CTX = 16  # number of context vectors
+    cfg.TRAINER.COOP.N_CTX = 21  # number of context vectors
     cfg.TRAINER.COOP.CSC = False  # class-specific context
     cfg.TRAINER.COOP.CTX_INIT = ""  # initialization words
     cfg.TRAINER.COOP.PREC = "fp16"  # fp16, fp32, amp
     cfg.TRAINER.COOP.CLASS_TOKEN_POSITION = "end"  # 'middle' or 'end' or 'front'
 
-    cfg.TRAINER.COCOOP = CN()
-    cfg.TRAINER.COCOOP.N_CTX = 16  # number of context vectors
-    cfg.TRAINER.COCOOP.CTX_INIT = ""  # initialization words
-    cfg.TRAINER.COCOOP.PREC = "fp16"  # fp16, fp32, amp
-
+    cfg.TRAINER.EMOCOOP = CN()
+    cfg.TRAINER.EMOCOOP.N_CTX = 7  # number of context vectors
+    cfg.TRAINER.EMOCOOP.N_VISUAL_CTX = 4
+    cfg.TRAINER.EMOCOOP.USE_GLOVE_INIT = True  
+    cfg.TRAINER.EMOCOOP.GLOVE_MODEL = "glove-wiki-gigaword-300"
+    cfg.TRAINER.EMOCOOP.USE_VISUAL_CLUSTERING = True
+    cfg.TRAINER.EMOCOOP.AUX_LOSS_WEIGHT = 0.3
+    # 自适应权重调整参数
+    cfg.TRAINER.EMOCOOP.MIN_AUX_LOSS_WEIGHT = 0.2
+    cfg.TRAINER.EMOCOOP.MAX_AUX_LOSS_WEIGHT = 0.5
+    cfg.TRAINER.EMOCOOP.WEIGHT_PATIENCE = 8
+    cfg.TRAINER.EMOCOOP.IMPROVEMENT_THRESHOLD = 0.01
+    cfg.TRAINER.EMOCOOP.DECAY_FACTOR = 0.95
+    cfg.TRAINER.EMOCOOP.GROWTH_FACTOR = 1.05
+    cfg.TRAINER.EMOCOOP.MIN_EPOCHS_BEFORE_ADJUST = 3
+    cfg.TRAINER.EMOCOOP.WEIGHT_STRATEGY = "conservative"
+    # 情感分类专用模板
+    cfg.TRAINER.EMOCOOP.CTX_INIT = "The emotions contained in this photo are"
+    cfg.TRAINER.EMOCOOP.PREC = "fp32"
+    cfg.TRAINER.EMOCOOP.CLASS_TOKEN_POSITION = "end"
+    cfg.TRAINER.EMOCOOP.VOTE_TYPE = "mean"  # voting type for multiple prompts: "mean" or "max"
+    cfg.TRAINER.EMOCOOP.USE_COLOR_ANALYSIS = False
     cfg.DATASET.SUBSAMPLE_CLASSES = "all"  # all, base or new
-
+    cfg.DATASET.CSV_PATH = "/home/user_3505_11/data/data_csv/train_data_coco.csv"
+    cfg.DATASET.LABEL_MAPPING = CN(new_allowed=True)
 
 def setup_cfg(args):
     cfg = get_cfg_default()
@@ -142,6 +160,7 @@ def main(args):
     trainer = build_trainer(cfg)
 
     if args.eval_only:
+        trainer.build_data_loader()
         trainer.load_model(args.model_dir, epoch=args.load_epoch)
         trainer.test()
         return

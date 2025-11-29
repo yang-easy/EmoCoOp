@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from torch.cuda.amp import GradScaler, autocast
-
+import pandas as pd
 from dassl.engine import TRAINER_REGISTRY, TrainerX
 from dassl.metrics import compute_accuracy
 from dassl.utils import load_pretrained_weights, load_checkpoint
@@ -13,11 +13,17 @@ from dassl.optim import build_optimizer, build_lr_scheduler
 from clip import clip
 from clip.simple_tokenizer import SimpleTokenizer as _Tokenizer
 
+from sklearn.metrics import precision_score, recall_score, f1_score, average_precision_score
+import numpy as np
+
 _tokenizer = _Tokenizer()
 
-
-def load_clip_to_cpu(cfg):
-    backbone_name = cfg.MODEL.BACKBONE.NAME
+def load_clip_to_cpu(backbone_name):
+    """Load CLIP model to CPU.
+    
+    Args:
+        backbone_name (str): Name of the CLIP backbone.
+    """
     url = clip._MODELS[backbone_name]
     model_path = clip._download(url)
 
@@ -210,12 +216,11 @@ class CustomCLIP(nn.Module):
 
 @TRAINER_REGISTRY.register()
 class CoOp(TrainerX):
-    """Context Optimization (CoOp).
-
-    Learning to Prompt for Vision-Language Models
-    https://arxiv.org/abs/2109.01134
+    """Context Optimization (CoOp) for Multi-label Classification.
     """
-
+    def __init__(self, cfg):
+        super().__init__(cfg)  # 确保这行存在
+        self.data_loader = self.build_data_loader() 
     def check_cfg(self, cfg):
         assert cfg.TRAINER.COOP.PREC in ["fp16", "fp32", "amp"]
 
@@ -224,7 +229,7 @@ class CoOp(TrainerX):
         classnames = self.dm.dataset.classnames
 
         print(f"Loading CLIP (backbone: {cfg.MODEL.BACKBONE.NAME})")
-        clip_model = load_clip_to_cpu(cfg)
+        clip_model = load_clip_to_cpu(cfg.MODEL.BACKBONE.NAME)
         
         if cfg.TRAINER.COOP.PREC == "fp32" or cfg.TRAINER.COOP.PREC == "amp":
             # CLIP's default precision is fp16
@@ -249,33 +254,79 @@ class CoOp(TrainerX):
 
         self.scaler = GradScaler() if cfg.TRAINER.COOP.PREC == "amp" else None
 
-        # Note that multi-gpu training could be slow because CLIP's size is
-        # big, which slows down the copy operation in DataParallel
-        device_count = torch.cuda.device_count()
-        if device_count > 1:
-            print(f"Multiple GPUs detected (n_gpus={device_count}), use all of them!")
-            self.model = nn.DataParallel(self.model)
+        # 针对多标签分类设置二元交叉熵损失
+        self.bce_loss = nn.BCEWithLogitsLoss()
 
     def forward_backward(self, batch):
-        image, label = self.parse_batch_train(batch)
+        image, target = self.parse_batch_train(batch)
         
         prec = self.cfg.TRAINER.COOP.PREC
         if prec == "amp":
             with autocast():
                 output = self.model(image)
-                loss = F.cross_entropy(output, label)
+                loss = self.bce_loss(output, target)
             self.optim.zero_grad()
             self.scaler.scale(loss).backward()
             self.scaler.step(self.optim)
             self.scaler.update()
         else:
             output = self.model(image)
-            loss = F.cross_entropy(output, label)
+            
+            # 确保target的形状与output匹配
+            if output.shape != target.shape:
+                # 打印出形状以便调试
+                print(f"Shape mismatch: output {output.shape}, target {target.shape}")
+                
+                if len(target.shape) == 2 and target.shape[1] == 1:
+                    # 如果target是[batch_size, 1]，可能需要对其进行变换
+                    if hasattr(self.dm.dataset, 'num_classes'):
+                        num_classes = self.dm.dataset.num_classes
+                        # 转换为one-hot编码
+                        new_target = torch.zeros(target.size(0), num_classes, device=target.device)
+                        for i in range(target.size(0)):
+                            if target[i, 0] < num_classes:  # 安全检查
+                                new_target[i, target[i, 0].long()] = 1.0
+                        target = new_target
+                    else:
+                        # 如果不知道类别数，尝试从输出推断
+                        target = F.one_hot(target.long().squeeze(1), num_classes=output.size(1)).float()
+                
+                # 如果target是一维的[batch_size]，转换为与output相同的形状
+                elif len(target.shape) == 1:
+                    # 我们假设这是多标签分类，每个样本可能有多个标签
+                    # 但如果target是索引形式，我们需要转换为one-hot
+                    if output.size(1) > 1:  # 确保这是多类问题
+                        target = F.one_hot(target.long(), num_classes=output.size(1)).float()
+            
+            # 最后检查确保形状匹配
+            if output.shape != target.shape:
+                # 如果仍然不匹配，尝试转置target
+                if target.shape[0] == output.shape[1] and target.shape[1] == output.shape[0]:
+                    target = target.t()
+                # 如果还是不匹配，则调整target使其满足要求
+                else:
+                    # 确保target是二维的正确形状
+                    target = target.view(output.size(0), -1)
+                    # 如果列数仍然不匹配，进行填充或裁剪
+                    if target.size(1) != output.size(1):
+                        if target.size(1) < output.size(1):
+                            # 填充
+                            padding = torch.zeros(target.size(0), output.size(1) - target.size(1), 
+                                                 device=target.device)
+                            target = torch.cat([target, padding], dim=1)
+                        else:
+                            # 裁剪
+                            target = target[:, :output.size(1)]
+            
+            # 确保target是浮点类型
+            target = target.float()
+            
+            # 应用损失函数
+            loss = self.bce_loss(output, target)
             self.model_backward_and_update(loss)
 
         loss_summary = {
             "loss": loss.item(),
-            "acc": compute_accuracy(output, label)[0].item(),
         }
 
         if (self.batch_idx + 1) == self.num_batches:
@@ -285,41 +336,251 @@ class CoOp(TrainerX):
 
     def parse_batch_train(self, batch):
         input = batch["img"]
-        label = batch["label"]
+        # 获取多热编码标签
+        multi_hot = batch["label"]
+        
+        # 确保multi_hot是tensor
+        if isinstance(multi_hot, list):
+            multi_hot = torch.stack(multi_hot)
+        
+        # 获取类别数量 - 确保我们可以创建正确维度的标签
+        num_classes = self.dm.dataset.num_classes if hasattr(self.dm.dataset, 'num_classes') else None
+        if num_classes is None and hasattr(self.model, 'prompt_learner'):
+            num_classes = self.model.prompt_learner.n_cls
+            
+        # 关键修复：确保标签的形状是 [batch_size, num_classes]
+        if len(multi_hot.shape) == 1:
+            # 如果是一维的，可能是索引标签或者被flatten的多热向量
+            if num_classes is not None:
+                if torch.max(multi_hot) < num_classes:  # 可能是索引标签
+                    new_multi_hot = torch.zeros(multi_hot.size(0), num_classes, 
+                                              device=multi_hot.device)
+                    for i in range(multi_hot.size(0)):
+                        new_multi_hot[i, multi_hot[i].long()] = 1.0
+                    multi_hot = new_multi_hot
+                else:  # 可能是被flatten的多热向量
+                    multi_hot = multi_hot.view(-1, num_classes)
+            else:
+                # 如果不知道类别数，只能尝试reshape
+                batch_size = input.size(0)
+                if multi_hot.size(0) % batch_size == 0:
+                    multi_hot = multi_hot.view(batch_size, -1)
+        
+        # 确保是浮点类型，用于BCE损失
+        multi_hot = multi_hot.float()
+        
         input = input.to(self.device)
-        label = label.to(self.device)
-        return input, label
+        multi_hot = multi_hot.to(self.device)
+        return input, multi_hot
 
-    def load_model(self, directory, epoch=None):
-        if not directory:
-            print("Note that load_model() is skipped as no pretrained model is given")
-            return
+    def parse_batch_test(self, batch):
+        return self.parse_batch_train(batch)
 
-        names = self.get_model_names()
+    def model_inference(self, input):
+        return self.model(input)
 
-        # By default, the best model is loaded
-        model_file = "model-best.pth.tar"
+    
+    def top_k_recall(self, probs, labels, k=1):
+        total = 0
+        correct = 0
+        for i in range(len(probs)):
+            true_label = labels[i]
+            if true_label.dim() > 0 and true_label.numel() > 1:
+                true_label = torch.argmax(true_label)  # 处理 one-hot 或多维标签
+            else:
+                true_label = true_label.item()
+            topk = torch.topk(probs[i], k=k).indices.cpu().numpy()
+            if true_label in topk:
+                correct += 1
+            total += 1
+        return correct / total
 
-        if epoch is not None:
-            model_file = "model.pth.tar-" + str(epoch)
 
-        for name in names:
-            model_path = osp.join(directory, name, model_file)
+    def evaluate(self, split_name="val"):
+        """多标签分类的评估方法"""
+        self.set_model_mode("eval")
+        self.evaluator.reset()
 
-            if not osp.exists(model_path):
-                raise FileNotFoundError('Model not found at "{}"'.format(model_path))
+        all_labels = []
+        all_preds = []
+        all_probs = []
+        
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(self.data_loader[split_name]):
+                input, target = self.parse_batch_test(batch)
+                output = self.model_inference(input)
+                
+                # 确保target与output形状匹配（仅用于评估指标计算）
+                if output.shape != target.shape:
+                    # 如果需要，调整target形状
+                    if len(target.shape) == 1:
+                        target = F.one_hot(target.long(), num_classes=output.size(1)).float()
+                    elif target.shape[1] == 1 and output.shape[1] > 1:
+                        target = F.one_hot(target.long().squeeze(1), num_classes=output.size(1)).float()
+                    elif target.shape[0] == output.shape[1] and target.shape[1] == output.shape[0]:
+                        target = target.t()
+                
+                # 使用sigmoid将输出转换为概率
+                probs = torch.sigmoid(output)
+                # 使用阈值0.5将概率转换为二进制预测
+                preds = (probs >= 0.5).float()
+                
+                all_labels.append(target.cpu())
+                all_preds.append(preds.cpu())
+                all_probs.append(probs.cpu())
+        
+        # 合并所有批次的结果
+        all_labels = torch.cat(all_labels).numpy()
+        all_preds = torch.cat(all_preds).numpy()
+        all_probs = torch.cat(all_probs).numpy()
+        
+        # 计算多标签评估指标
+        results = {}
+        
+        # 样本平均指标
+        precision_samples = precision_score(all_labels, all_preds, average='samples', zero_division=0)
+        recall_samples = recall_score(all_labels, all_preds, average='samples', zero_division=0)
+        f1_samples = f1_score(all_labels, all_preds, average='samples', zero_division=0)
+        
+        # 微平均指标
+        precision_micro = precision_score(all_labels, all_preds, average='micro', zero_division=0)
+        recall_micro = recall_score(all_labels, all_preds, average='micro', zero_division=0)
+        f1_micro = f1_score(all_labels, all_preds, average='micro', zero_division=0)
+        
+        # 宏平均指标
+        precision_macro = precision_score(all_labels, all_preds, average='macro', zero_division=0)
+        recall_macro = recall_score(all_labels, all_preds, average='macro', zero_division=0)
+        f1_macro = f1_score(all_labels, all_preds, average='macro', zero_division=0)
+        
+        # 计算top-k recall
+        recall_at_2 = self.top_k_recall(torch.tensor(all_probs), torch.tensor(all_labels), k=2)
+        recall_at_3 = self.top_k_recall(torch.tensor(all_probs), torch.tensor(all_labels), k=3)
+        # 计算平均精度均值 (mAP)
+        ap_per_class = []
+        for i in range(all_labels.shape[1]):
+            if np.sum(all_labels[:, i]) > 0:  # 只考虑有正样本的类别
+                ap = average_precision_score(all_labels[:, i], all_probs[:, i])
+                ap_per_class.append(ap)
+        
+        map_score = np.mean(ap_per_class) if ap_per_class else 0
+        
+        results = {
+            "precision_samples": precision_samples,
+            "recall_samples": recall_samples,
+            "f1_samples": f1_samples,
+            "precision_micro": precision_micro,
+            "recall_micro": recall_micro,
+            "f1_micro": f1_micro,
+            "precision_macro": precision_macro,
+            "recall_macro": recall_macro,
+            "f1_macro": f1_macro,
+            "mAP": map_score,
+            "recall@2": recall_at_2,
+            "recall@3": recall_at_3
+        }
+        
+        print(f"* Results on {split_name}:")
+        for k, v in results.items():
+            print(f"* {k}: {v:.4f}")
+        
+        return list(results.values())[10]  # 返回第10个指标作为主要评估指标
 
-            checkpoint = load_checkpoint(model_path)
-            state_dict = checkpoint["state_dict"]
-            epoch = checkpoint["epoch"]
 
-            # Ignore fixed token vectors
-            if "token_prefix" in state_dict:
-                del state_dict["token_prefix"]
+    def test(self, split_name="test"):
+        """多标签分类的评估方法"""
+        self.set_model_mode("test")
+        self.evaluator.reset()
 
-            if "token_suffix" in state_dict:
-                del state_dict["token_suffix"]
+        all_labels = []
+        all_preds = []
+        all_probs = []
+        file_names = []  # 用于保存每个图像的文件名
+        
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(self.data_loader[split_name]):
+                input, target = self.parse_batch_test(batch)
+                output = self.model_inference(input)
+                
+                # 确保target与output形状匹配（仅用于评估指标计算）
+                if output.shape != target.shape:
+                    # 如果需要，调整target形状
+                    if len(target.shape) == 1:
+                        target = F.one_hot(target.long(), num_classes=output.size(1)).float()
+                    elif target.shape[1] == 1 and output.shape[1] > 1:
+                        target = F.one_hot(target.long().squeeze(1), num_classes=output.size(1)).float()
+                    elif target.shape[0] == output.shape[1] and target.shape[1] == output.shape[0]:
+                        target = target.t()
 
-            print("Loading weights to {} " 'from "{}" (epoch = {})'.format(name, model_path, epoch))
-            # set strict=False
-            self._models[name].load_state_dict(state_dict, strict=False)
+                # 使用sigmoid将输出转换为概率
+                probs = torch.sigmoid(output)
+                # 使用阈值0.5将概率转换为二进制预测
+                preds = (probs >= 0.5).float()
+
+                # 保存每个batch的文件名、标签、预测和概率
+                file_names.extend(batch["impath"])  # 获取每个图像的文件名
+                all_labels.append(target.cpu())
+                all_preds.append(preds.cpu())
+                all_probs.append(probs.cpu())
+
+        # 合并所有批次的结果
+        all_labels = torch.cat(all_labels).numpy()
+        all_preds = torch.cat(all_preds).numpy()
+        all_probs = torch.cat(all_probs).numpy()
+
+        # 保存为 CSV 文件，文件名和每个类别的概率
+        df = pd.DataFrame(all_probs, columns=[f"class_{i}" for i in range(all_probs.shape[1])])
+        df.insert(0, "filename", file_names)  # 将文件名插入到前面
+        df.to_csv(f"{split_name}_predictions.csv", index=False)
+        print(f"已保存预测结果到 {split_name}_predictions.csv")
+
+        # 计算多标签评估指标
+        results = {}
+
+        # 样本平均指标
+        precision_samples = precision_score(all_labels, all_preds, average='samples', zero_division=0)
+        recall_samples = recall_score(all_labels, all_preds, average='samples', zero_division=0)
+        f1_samples = f1_score(all_labels, all_preds, average='samples', zero_division=0)
+
+        # 微平均指标
+        precision_micro = precision_score(all_labels, all_preds, average='micro', zero_division=0)
+        recall_micro = recall_score(all_labels, all_preds, average='micro', zero_division=0)
+        f1_micro = f1_score(all_labels, all_preds, average='micro', zero_division=0)
+
+        # 宏平均指标
+        precision_macro = precision_score(all_labels, all_preds, average='macro', zero_division=0)
+        recall_macro = recall_score(all_labels, all_preds, average='macro', zero_division=0)
+        f1_macro = f1_score(all_labels, all_preds, average='macro', zero_division=0)
+
+        # 计算top-k recall
+        recall_at_2 = self.top_k_recall(torch.tensor(all_probs), torch.tensor(all_labels), k=2)
+        recall_at_3 = self.top_k_recall(torch.tensor(all_probs), torch.tensor(all_labels), k=3)
+        # 计算平均精度均值 (mAP)
+        ap_per_class = []
+        for i in range(all_labels.shape[1]):
+            if np.sum(all_labels[:, i]) > 0:  # 只考虑有正样本的类别
+                ap = average_precision_score(all_labels[:, i], all_probs[:, i])
+                ap_per_class.append(ap)
+
+        map_score = np.mean(ap_per_class) if ap_per_class else 0
+
+        results = {
+            "precision_samples": precision_samples,
+            "recall_samples": recall_samples,
+            "f1_samples": f1_samples,
+            "precision_micro": precision_micro,
+            "recall_micro": recall_micro,
+            "f1_micro": f1_micro,
+            "precision_macro": precision_macro,
+            "recall_macro": recall_macro,
+            "f1_macro": f1_macro,
+            "mAP": map_score,
+            "recall@2": recall_at_2,
+            "recall@3": recall_at_3,
+        }
+
+        print(f"* Results on {split_name}:")
+        for k, v in results.items():
+            print(f"* {k}: {v:.4f}")
+
+        return list(results.values())[10]  # 返回第10个指标作为主要评估指标
+        

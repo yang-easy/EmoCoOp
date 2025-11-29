@@ -1,0 +1,20 @@
+DATASET:  
+  NAME: "EmotionDataset"
+  ROOT: "D:/Dongbahua/train_data"
+  SOURCE_DOMAINS: ["emotion"]
+  TARGET_DOMAINS: ["emotion"]
+  LABEL_MAPPING:
+    approval: 0
+    bloom: 1
+    calm: 2
+    devil: 3
+    fly: 4
+    guard: 5
+    negative: 6
+    neutral: 7
+    positive: 8
+    rest: 9
+    wilt: 10
+    work: 11
+    worried: 12
+

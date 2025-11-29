@@ -4,7 +4,7 @@ cd ../..
 
 # custom config
 DATA=/path/to/datasets
-TRAINER=CoCoOp
+TRAINER=EMOCOOP
 # TRAINER=CoOp
 
 DATASET=imagenet
